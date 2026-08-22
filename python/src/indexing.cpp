@@ -151,9 +151,23 @@ mx::array mlx_gather_nd(
       get_slice_params(
           start, end, stride, nb::cast<nb::slice>(idx), src.shape(i));
 
+      auto axis_size = src.shape(i);
       // Handle negative indices
-      start = (start < 0) ? start + src.shape(i) : start;
-      end = (end < 0) ? end + src.shape(i) : end;
+      start = (start < 0) ? start + axis_size : start;
+      end = (end < 0) ? end + axis_size : end;
+
+      // Clamp to the valid range for this axis, matching the behavior of
+      // mlx::core::slice / normalize_slice, so out-of-range or heavily
+      // negative bounds don't produce an incorrectly sized/valued gather.
+      if (stride < 0) {
+        start = std::min(start, axis_size - 1);
+        end = std::max(end, mx::ShapeElem{-1});
+        end = std::min(end, start);
+      } else {
+        start = std::max(mx::ShapeElem{0}, std::min(start, axis_size));
+        end = std::max(mx::ShapeElem{0}, std::min(end, axis_size));
+        end = std::max(end, start);
+      }
 
       gather_indices.push_back(arange(start, end, stride, mx::uint32));
       num_slices++;
@@ -253,8 +267,13 @@ auto mlx_expand_ellipsis(const mx::Shape& shape, const nb::tuple& entries) {
 
   // Expand ellipsis
   if (has_ellipsis) {
-    for (int axis = non_none_indices_before;
-         axis < shape.size() - non_none_indices_after;
+    int ndim = static_cast<int>(shape.size());
+    if (non_none_indices > ndim) {
+      std::ostringstream msg;
+      msg << "Too many indices for array with " << ndim << " dimensions.";
+      throw std::invalid_argument(msg.str());
+    }
+    for (int axis = non_none_indices_before; axis < ndim - non_none_indices_after;
          axis++) {
       indices.push_back(
           nb::slice(mx::ShapeElem{0}, shape[axis], mx::ShapeElem{1}));
@@ -778,6 +797,8 @@ mlx_compute_scatter_args(
     return mlx_scatter_args_int(src, obj, vals);
   } else if (nb::isinstance<nb::tuple>(obj)) {
     return mlx_scatter_args_nd(src, nb::cast<nb::tuple>(obj), vals);
+  } else if (nb::isinstance<nb::ellipsis>(obj)) {
+    return {{}, broadcast_to(vals, src.shape()), {}};
   } else if (obj.is_none()) {
     return {{}, broadcast_to(vals, src.shape()), {}};
   } else if (nb::isinstance<nb::list>(obj)) {

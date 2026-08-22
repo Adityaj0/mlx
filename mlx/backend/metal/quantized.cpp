@@ -649,7 +649,7 @@ void qvm_split_k(
   constexpr int bk = 32;
   int bn = std::min(group_size, 32) * num_simdgroups;
   MTL::Size group_dims = MTL::Size(bk, num_simdgroups, 1);
-  MTL::Size grid_dims = MTL::Size(M, N / bn, B);
+  MTL::Size grid_dims = MTL::Size(M, (N + bn - 1) / bn, B);
 
   auto x_shape = x.shape();
   auto x_strides = x.strides();
@@ -830,7 +830,8 @@ void qmm_nax(
 
   int wm = 2;
   int wn = 2;
-  int bm = 64;
+  // Use smaller bm when one block covers all of M.
+  int bm = (M <= 32) ? 32 : 64;
   int bn = 64;
   int bk = 64;
   MTL::Size group_dims(32, wn, wm);
@@ -1035,7 +1036,9 @@ void qmm(
     metal::Device& d,
     const Stream& s,
     const std::string& mode) {
-  if (metal::is_nax_available() && transpose && (K % 64 == 0) &&
+  bool has_nax_kernel =
+      metal::is_nax_available() && (transpose || mode == "affine");
+  if (has_nax_kernel && transpose && (K % 64 == 0) &&
       (env::enable_tf32() || x.dtype() != float32)) {
     return qmm_nax(
         /* const array& x = */ x,
@@ -1489,8 +1492,10 @@ void gather_qmm_rhs_nax(
     biases = ensure_row_contiguous(*biases_, d, s);
   }
 
-  // TODO: Tune the block sizes
-  int bm = 64, bn = 64, bk = 64;
+  // Use smaller bm for many experts and few tokens.
+  int E = w.size() / w.shape(-1) / w.shape(-2);
+  int bm = (M / E < 64) ? 32 : 64;
+  int bn = 64, bk = 64;
   int wm = 2, wn = 2;
 
   const bool align_M = (M % bm) == 0;

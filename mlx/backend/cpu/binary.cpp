@@ -47,10 +47,22 @@ void DivMod::eval_cpu(
                     out_b = array::unsafe_weak_copy(out_b),
                     bopt]() mutable {
     auto integral_op = [](auto x, auto y) {
-      return std::make_pair(x / y, x % y);
+      auto q = x / y;
+      auto r = x % y;
+      if constexpr (std::is_signed_v<decltype(x)>) {
+        if (r != 0 && (r < 0) != (y < 0)) {
+          q -= 1;
+          r += y;
+        }
+      }
+      return std::make_pair(q, r);
     };
     auto float_op = [](auto x, auto y) {
-      return std::make_pair(std::trunc(x / y), std::fmod(x, y));
+      auto r = std::fmod(x, y);
+      if (r != 0 && (r < 0) != (y < 0)) {
+        r += y;
+      }
+      return std::make_pair(std::floor(x / y), r);
     };
 
     dispatch_all_types(out_a.dtype(), [&](auto type_tag) {
@@ -96,26 +108,11 @@ void Equal::eval_cpu(const std::vector<array>& inputs, array& out) {
                       b = array::unsafe_weak_copy(b),
                       out = array::unsafe_weak_copy(out),
                       bopt]() mutable {
-      switch (a.dtype()) {
-        case float16:
-          binary_op<float16_t, bool, detail::NaNEqual>(a, b, out, bopt);
-          break;
-        case float32:
-          binary_op<float, bool, detail::NaNEqual>(a, b, out, bopt);
-          break;
-        case float64:
-          binary_op<double, bool, detail::NaNEqual>(a, b, out, bopt);
-          break;
-        case bfloat16:
-          binary_op<bfloat16_t, bool, detail::NaNEqual>(a, b, out, bopt);
-          break;
-        case complex64:
-          binary_op<complex64_t, bool, detail::NaNEqual>(a, b, out, bopt);
-          break;
-        default:
-          throw std::runtime_error(
-              "[NanEqual::eval_cpu] Only for floating point types.");
-      }
+      dispatch_inexact_types(
+          a.dtype(), "[NanEqual::eval_cpu]", [&](auto type_tag) {
+            using T = MLX_GET_TYPE(type_tag);
+            binary_op<T, bool, detail::NaNEqual>(a, b, out, bopt);
+          });
     });
   } else {
     comparison_op_cpu(a, b, out, detail::Equal(), stream());

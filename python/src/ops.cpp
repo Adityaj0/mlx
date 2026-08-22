@@ -1,5 +1,6 @@
 // Copyright © 2023-2024 Apple Inc.
 
+#include <limits>
 #include <numeric>
 #include <ostream>
 #include <variant>
@@ -24,11 +25,14 @@ namespace mx = mlx::core;
 namespace nb = nanobind;
 using namespace nb::literals;
 
-using Scalar = std::variant<bool, int, double>;
+using Scalar = std::variant<bool, int64_t, double>;
 
 mx::Dtype scalar_to_dtype(Scalar s) {
-  if (std::holds_alternative<int>(s)) {
-    return mx::int32;
+  if (auto pv = std::get_if<int64_t>(&s); pv) {
+    return (*pv > std::numeric_limits<int>::max() ||
+            *pv < std::numeric_limits<int>::min())
+        ? mx::int64
+        : mx::int32;
   } else if (std::holds_alternative<double>(s)) {
     return mx::float32;
   } else {
@@ -37,7 +41,7 @@ mx::Dtype scalar_to_dtype(Scalar s) {
 }
 
 double scalar_to_double(Scalar s) {
-  if (auto pv = std::get_if<int>(&s); pv) {
+  if (auto pv = std::get_if<int64_t>(&s); pv) {
     return static_cast<double>(*pv);
   } else if (auto pv = std::get_if<double>(&s); pv) {
     return *pv;
@@ -1513,7 +1517,7 @@ void init_ops(nb::module_& m) {
           start (float or int, optional): Starting value which defaults to ``0``.
           stop (float or int, optional): Stopping value.
           step (float or int, optional): Increment which defaults to ``1``.
-          dtype (Dtype, optional): Specifies the data type of the output. If unspecified will default to ``float32`` if any of ``start``, ``stop``, or ``step`` are ``float``. Otherwise will default to ``int32``.
+          dtype (Dtype, optional): Specifies the data type of the output. If unspecified will default to ``float32`` if any of ``start``, ``stop``, or ``step`` are ``float``. Otherwise will default to ``int32``, or ``int64`` if any of ``start``, ``stop``, or ``step`` does not fit in ``int32``.
 
       Returns:
           array: The range of values.
@@ -1644,22 +1648,25 @@ void init_ops(nb::module_& m) {
       [](Scalar start,
          Scalar stop,
          int num,
+         bool endpoint,
          std::optional<mx::Dtype> dtype,
          mx::StreamOrDevice s) {
         return mx::linspace(
             scalar_to_double(start),
             scalar_to_double(stop),
             num,
+            endpoint,
             dtype.value_or(mx::float32),
             s);
       },
       "start"_a,
       "stop"_a,
       "num"_a = 50,
+      "endpoint"_a = true,
       "dtype"_a.none() = mx::float32,
       "stream"_a = nb::none(),
       nb::sig(
-          "def linspace(start: scalar, stop: scalar, num: int | None = 50, dtype: Dtype | None = float32, stream: StreamOrDevice = None) -> array"),
+          "def linspace(start: scalar, stop: scalar, num: int | None = 50, endpoint: bool = True, dtype: Dtype | None = float32, stream: StreamOrDevice = None) -> array"),
       R"pbdoc(
         Generate ``num`` evenly spaced numbers over interval ``[start, stop]``.
 
@@ -1667,6 +1674,9 @@ void init_ops(nb::module_& m) {
             start (scalar): Starting value.
             stop (scalar): Stopping value.
             num (int, optional): Number of samples, defaults to ``50``.
+            endpoint (bool, optional): If ``True``, ``stop`` is the last
+              sample. Otherwise it is not included and the samples are spaced
+              over the half-open interval ``[start, stop)``. Default: ``True``.
             dtype (Dtype, optional): Specifies the data type of the output,
               default to ``float32``.
 
@@ -1758,7 +1768,7 @@ void init_ops(nb::module_& m) {
       },
       nb::arg(),
       "indices"_a,
-      "axis"_a.none(),
+      "axis"_a = nb::none(),
       nb::kw_only(),
       "stream"_a = nb::none(),
       nb::sig(
@@ -3153,6 +3163,40 @@ void init_ops(nb::module_& m) {
             array: The ``uint32`` array containing indices that partition the input.
       )pbdoc");
   m.def(
+      "searchsorted",
+      &mx::searchsorted,
+      nb::arg(),
+      nb::arg(),
+      "side"_a = "left",
+      nb::kw_only(),
+      "stream"_a = nb::none(),
+      nb::sig(
+          "def searchsorted(sorted_sequence: array, values: array, /, side: str = 'left', *, stream: StreamOrDevice = None) -> array"),
+      R"pbdoc(
+        Find the indices that keep ``sorted_sequence`` sorted when inserting ``values``.
+
+        Args:
+            sorted_sequence (array): A 1-D array sorted in ascending order.
+            values (array): The values to insert. May have any shape.
+            side (str, optional): Either ``'left'`` or ``'right'``. With
+              ``'left'`` the first suitable index is returned, so the result is
+              the number of elements strictly less than the value. With
+              ``'right'`` the last is returned, so the result is the number of
+              elements less than or equal to it. The two differ only where a
+              value is already present. Default: ``'left'``.
+
+        Returns:
+            array: A ``uint32`` array with the same shape as ``values``, holding
+            indices in ``[0, sorted_sequence.size]``.
+
+        Example:
+            >>> a = mx.array([1, 2, 2, 4])
+            >>> mx.searchsorted(a, mx.array([0, 2, 3, 5]))
+            array([0, 1, 3, 4], dtype=uint32)
+            >>> mx.searchsorted(a, mx.array([0, 2, 3, 5]), side="right")
+            array([0, 3, 3, 4], dtype=uint32)
+      )pbdoc");
+  m.def(
       "topk",
       [](const mx::array& a,
          int k,
@@ -3244,7 +3288,7 @@ void init_ops(nb::module_& m) {
       "precise"_a = false,
       "stream"_a = nb::none(),
       nb::sig(
-          "def softmax(a: array, /, axis: None | int | Sequence[int] = None, *, stream: StreamOrDevice = None) -> array"),
+          "def softmax(a: array, /, axis: None | int | Sequence[int] = None, *, precise: bool = False, stream: StreamOrDevice = None) -> array"),
       R"pbdoc(
         Perform the softmax along the given axis.
 
@@ -3259,6 +3303,10 @@ void init_ops(nb::module_& m) {
             axis (int or list(int), optional): Optional axis or axes to compute
              the softmax over. If unspecified this performs the softmax over
              the full array.
+            precise (bool, optional): Accumulate in ``float32`` for inputs of
+              lower precision. Otherwise the accumulation type matches the
+              input, which can lose precision over long reduction axes.
+              Default: ``False``.
 
         Returns:
             array: The output of the softmax.
@@ -3348,14 +3396,14 @@ void init_ops(nb::module_& m) {
          mx::StreamOrDevice s) {
         std::vector<mx::array> arrays =
             nb::cast<std::vector<mx::array>>(arrays_);
-        return mx::meshgrid(arrays, sparse, indexing, s);
+        return nb::tuple(nb::cast(mx::meshgrid(arrays, sparse, indexing, s)));
       },
       "arrays"_a,
       "sparse"_a = false,
       "indexing"_a = "xy",
       "stream"_a = nb::none(),
       nb::sig(
-          "def meshgrid(*arrays: array, sparse: bool | None = False, indexing: str | None = 'xy', stream: StreamOrDevice = None) -> array"),
+          "def meshgrid(*arrays: array, sparse: bool | None = False, indexing: str | None = 'xy', stream: StreamOrDevice = None) -> tuple[array, ...]"),
       R"pbdoc(
         Generate multidimensional coordinate grids from 1-D coordinate arrays
 
@@ -3368,7 +3416,7 @@ void init_ops(nb::module_& m) {
               Defaults to ``'xy'``.
 
         Returns:
-            list(array): The output arrays.
+            tuple(array): The output arrays.
       )pbdoc");
   m.def(
       "repeat",
@@ -3453,18 +3501,23 @@ void init_ops(nb::module_& m) {
          const ScalarOrArray& constant_value,
          mx::StreamOrDevice s) {
         if (auto pv = std::get_if<int>(&pad_width); pv) {
-          return mx::pad(a, *pv, to_array(constant_value), mode, s);
+          return mx::pad(a, *pv, to_array(constant_value, a.dtype()), mode, s);
         } else if (auto pv = std::get_if<std::tuple<int>>(&pad_width); pv) {
           return mx::pad(
-              a, std::get<0>(*pv), to_array(constant_value), mode, s);
+              a,
+              std::get<0>(*pv),
+              to_array(constant_value, a.dtype()),
+              mode,
+              s);
         } else if (auto pv = std::get_if<std::pair<int, int>>(&pad_width); pv) {
-          return mx::pad(a, *pv, to_array(constant_value), mode, s);
+          return mx::pad(a, *pv, to_array(constant_value, a.dtype()), mode, s);
         } else {
           auto v = std::get<std::vector<std::pair<int, int>>>(pad_width);
           if (v.size() == 1) {
-            return mx::pad(a, v[0], to_array(constant_value), mode, s);
+            return mx::pad(
+                a, v[0], to_array(constant_value, a.dtype()), mode, s);
           } else {
-            return mx::pad(a, v, to_array(constant_value), mode, s);
+            return mx::pad(a, v, to_array(constant_value, a.dtype()), mode, s);
           }
         }
       },
@@ -3475,7 +3528,7 @@ void init_ops(nb::module_& m) {
       nb::kw_only(),
       "stream"_a = nb::none(),
       nb::sig(
-          "def pad(a: array, pad_width: int | tuple[int] | tuple[int, int] | list[tuple[int, int]], mode: Literal['constant', 'edge'] = 'constant', constant_values: scalar | array = 0, *, stream: StreamOrDevice = None) -> array"),
+          "def pad(a: array, pad_width: int | tuple[int] | tuple[int, int] | list[tuple[int, int]], mode: Literal['constant', 'edge', 'reflect', 'symmetric'] = 'constant', constant_values: scalar | array = 0, *, stream: StreamOrDevice = None) -> array"),
       R"pbdoc(
         Pad an array with a constant value
 
@@ -3490,6 +3543,8 @@ void init_ops(nb::module_& m) {
             mode: Padding mode. One of the following strings:
               "constant" (default): Pads with a constant value.
               "edge": Pads with the edge values of array.
+              "reflect": Pads with the reflection of the array, without repeating the edge values.
+              "symmetric": Pads with the reflection of the array, repeating the edge values.
             constant_values (array or scalar, optional): Optional constant value
               to pad the edges of the array with.
 
