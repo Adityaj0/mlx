@@ -22,10 +22,19 @@ try:
 except ImportError:
     has_tf = False
 
+
 try:
     import torch
 
-    has_torch_mps = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+    torch_version = [int(v) for v in torch.__version__.split("+")[0].split(".")]
+    is_torch_212 = torch_version[0] > 2 or (
+        torch_version[0] == 2 and torch_version[1] >= 12
+    )
+    has_torch_mps = (
+        is_torch_212
+        and hasattr(torch.backends, "mps")
+        and torch.backends.mps.is_available()
+    )
 except ImportError:
     torch = None
     has_torch_mps = False
@@ -513,6 +522,33 @@ class TestArray(mlx_tests.MLXTestCase):
 
         out = mx.array([x], dtype=mx.float64).item()
         self.assertEqual(out, x)
+
+    def test_construction_from_lists_wide_ints(self):
+        # A python int that does not fit in int32 widens to int64, the same
+        # rule the scalar path already uses. It used to raise std::bad_cast.
+        for value in (2**31, 2**40, -(2**31) - 1, -(2**40)):
+            for make in (
+                lambda v: [v],
+                lambda v: (v,),
+                lambda v: [[v]],
+                lambda v: [v, 1],
+            ):
+                x = mx.array(make(value))
+                self.assertEqual(x.dtype, mx.int64, msg=f"{value} {make(value)}")
+                self.assertEqual(x.flatten()[0].item(), value)
+                self.assertEqual(mx.array(value).dtype, mx.int64)
+
+        # Values that still fit keep int32, including both boundaries.
+        for value in (0, 1, 2**31 - 1, -(2**31)):
+            x = mx.array([value])
+            self.assertEqual(x.dtype, mx.int32, msg=str(value))
+            self.assertEqual(x[0].item(), value)
+
+        # An explicit dtype still wins.
+        self.assertEqual(mx.array([2**40], mx.int64).dtype, mx.int64)
+        self.assertEqual(mx.array([1, 2], mx.int64).dtype, mx.int64)
+        # A float in the list still makes it float, not int64.
+        self.assertEqual(mx.array([2**40, 1.5]).dtype, mx.float32)
 
     def test_construction_from_lists_of_mlx_arrays(self):
         dtypes = [
@@ -1200,6 +1236,26 @@ class TestArray(mlx_tests.MLXTestCase):
         a_mlx = mx.array(a_np)
         self.assertTrue(np.array_equal(a_np[2:-1, 0], np.array(a_mlx[2:-1, 0])))
 
+    def test_indexing_too_many_after_ellipsis(self):
+        # Regression test: indexing with an ellipsis followed by more
+        # non-None indices than the array has dimensions used to compute an
+        # unsigned (size_t) underflow in the ellipsis-expansion loop bound,
+        # causing an out-of-bounds read / crash instead of raising.
+        a = mx.array([1, 2, 3])
+        with self.assertRaises(ValueError):
+            a[..., 0, 0]
+        with self.assertRaises(ValueError):
+            a[..., 0, 0, 0]
+        with self.assertRaises(ValueError):
+            a[..., 0:1, 0:1]
+
+        a2 = mx.zeros((2, 2))
+        with self.assertRaises(ValueError):
+            a2[..., 0, 0, 0]
+
+        with self.assertRaises(ValueError):
+            a[..., 0, 0] = 5
+
     def test_indexing_grad(self):
         x = mx.array([[1, 2], [3, 4]]).astype(mx.float32)
         ind = mx.array([0, 1, 0]).astype(mx.float32)
@@ -1242,6 +1298,28 @@ class TestArray(mlx_tests.MLXTestCase):
 
         a[0:2] = 3
         self.assertEqual(a.tolist(), [3, 3, 1])
+
+        # Assigning through a bare Ellipsis, like a[:] and a[None]
+        e = mx.zeros((2, 3), mx.int32)
+        e[...] = 5
+        self.assertEqual(e.tolist(), [[5, 5, 5], [5, 5, 5]])
+
+        # Broadcasting an array update through Ellipsis
+        e[...] = mx.array([1, 2, 3])
+        self.assertEqual(e.tolist(), [[1, 2, 3], [1, 2, 3]])
+
+        e[...] = mx.zeros((2, 3), mx.int32)
+        self.assertEqual(e.tolist(), [[0, 0, 0], [0, 0, 0]])
+
+        # Scalar array
+        e = mx.array(0)
+        e[...] = 7
+        self.assertEqual(e.item(), 7)
+
+        # Shapes that cannot broadcast are still rejected
+        e = mx.zeros((2, 3), mx.int32)
+        with self.assertRaises(ValueError):
+            e[...] = mx.array([1, 2])
 
         a[0:3] = 4
         self.assertEqual(a.tolist(), [4, 4, 4])
