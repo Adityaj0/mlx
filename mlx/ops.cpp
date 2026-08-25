@@ -3730,6 +3730,9 @@ array take(const array& a, int index, int axis, StreamOrDevice s /* = {} */) {
   // Handle negative axis
   axis = axis < 0 ? a.ndim() + axis : axis;
 
+  // Handle negative index
+  index = index < 0 ? index + a.shape(axis) : index;
+
   Shape starts(a.ndim(), 0);
   Shape stops = a.shape();
   starts[axis] = index;
